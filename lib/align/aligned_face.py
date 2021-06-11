@@ -262,6 +262,18 @@ class AlignedFace():
         return self._cache["landmarks"][0]
 
     @property
+    def normalized_landmarks(self):
+        """ :class:`numpy.ndarray`: The 68 point facial landmarks normalized to 0.0 - 1.0 as
+        aligned by Umeyama. """
+        with self._cache["landmarks_normalized"][1]:
+            if self._cache["landmarks_normalized"][0] is None:
+                lms = np.expand_dims(self._frame_landmarks, axis=1)
+                lms = cv2.transform(lms, self._matrices["legacy"], lms.shape).squeeze()
+                logger.trace("normalized landmarks: %s", lms)
+                self._cache["landmarks_normalized"][0] = lms
+        return self._cache["landmarks_normalized"][0]
+
+    @property
     def interpolators(self):
         """ tuple: (`interpolator` and `reverse interpolator`) for the :attr:`adjusted matrix`. """
         with self._cache["interpolators"][1]:
@@ -270,6 +282,18 @@ class AlignedFace():
                 logger.trace("interpolators: %s", interpolators)
                 self._cache["interpolators"][0] = interpolators
         return self._cache["interpolators"][0]
+
+    @property
+    def average_distance(self):
+        """ float: The average distance of the core landmarks (18-67) from the mean face that was
+        used for aligning the image. """
+        with self._cache["average_distance"][1]:
+            if self._cache["average_distance"][0] is None:
+                # pylint:disable=unsubscriptable-object
+                average_distance = np.mean(np.abs(self.normalized_landmarks[17:] - _MEAN_FACE))
+                logger.trace("average_distance: %s", average_distance)
+                self._cache["average_distance"][0] = average_distance
+        return self._cache["average_distance"][0]
 
     @classmethod
     def _set_cache(cls):
@@ -286,6 +310,8 @@ class AlignedFace():
         return dict(pose=[None, Lock()],
                     original_roi=[None, Lock()],
                     landmarks=[None, Lock()],
+                    landmarks_normalized=[None, Lock()],
+                    average_distance=[None, Lock()],
                     adjusted_matrix=[None, Lock()],
                     interpolators=[None, Lock()],
                     head_size=[dict(), Lock()],
@@ -334,7 +360,7 @@ class AlignedFace():
             ``None`` if no image has been provided.
         """
         if image is None:
-            logger.debug("_extract_face called without a loaded image. Returning empty face.")
+            logger.trace("_extract_face called without a loaded image. Returning empty face.")
             return None
 
         if self._is_aligned and self._centering != "head":  # Crop out the sub face from full head
@@ -424,7 +450,7 @@ class AlignedFace():
         """
         with self._cache["cropped_roi"][1]:
             if centering not in self._cache["cropped_roi"][0]:
-                offset = self.pose.offset.get(centering, np.float32((0, 0)))  # legacy = 0,0
+                offset = self.pose.offset.get(centering, np.float32((0, 0)))  # legacy = 0.0
                 offset -= self.pose.offset["head"]
                 offset *= (self._head_size - (self._head_size * _EXTRACT_RATIOS["head"]))
 
@@ -447,10 +473,12 @@ class AlignedFace():
         with self._cache["cropped_slices"][1]:
             if not self._cache["cropped_slices"][0].get(self._centering):
                 roi = self.get_cropped_roi(self._centering)
-                head_size = self._head_size
-                slice_in = [slice(max(roi[1], 0), roi[3]), slice(max(roi[0], 0), roi[2])]
-                slice_out = [slice(max(roi[1] * -1, 0), self._size - max(0, roi[3] - head_size)),
-                             slice(max(roi[0] * -1, 0), self._size - max(0, roi[2] - head_size))]
+                slice_in = [slice(max(roi[1], 0), max(roi[3], 0)),
+                            slice(max(roi[0], 0), max(roi[2], 0))]
+                slice_out = [slice(max(roi[1] * -1, 0),
+                                   self._size - min(self._size, max(0, roi[3] - self._head_size))),
+                             slice(max(roi[0] * -1, 0),
+                                   self._size - min(self._size, max(0, roi[2] - self._head_size)))]
                 self._cache["cropped_slices"][0][self._centering] = {"in": slice_in,
                                                                      "out": slice_out}
                 logger.trace("centering: %s, cropped_slices: %s",
@@ -478,6 +506,7 @@ class PoseEstimate():
         self._camera_matrix = self._get_camera_matrix()
         self._rotation, self._translation = self._solve_pnp(landmarks)
         self._offset = self._get_offset()
+        self._pitch_yaw = None
 
     @property
     def xyz_2d(self):
@@ -498,6 +527,28 @@ class PoseEstimate():
         from the center of the face (between the eyes) or center of the head (middle of skull)
         rather than the nose area. """
         return self._offset
+
+    @property
+    def pitch(self):
+        """ float: The pitch of the aligned face in eular angles """
+        if not self._pitch_yaw:
+            self._get_pitch_yaw()
+        return self._pitch_yaw[0]
+
+    @property
+    def yaw(self):
+        """ float: The yaw of the aligned face in eular angles """
+        if not self._pitch_yaw:
+            self._get_pitch_yaw()
+        return self._pitch_yaw[1]
+
+    def _get_pitch_yaw(self):
+        """ Obtain the yaw and pitch from the :attr:`_rotation` in eular angles. """
+        proj_matrix = np.zeros((3, 4), dtype="float32")
+        proj_matrix[:3, :3] = cv2.Rodrigues(self._rotation)[0]
+        euler = cv2.decomposeProjectionMatrix(proj_matrix)[-1]
+        self._pitch_yaw = (euler[0][0], euler[1][0])
+        logger.trace("yaw_pitch: %s", self._pitch_yaw)
 
     @classmethod
     def _get_camera_matrix(cls):
@@ -552,8 +603,9 @@ class PoseEstimate():
         :class:`numpy.ndarray`
             The x, y offset of the new center from the old center.
         """
+        offset = dict(legacy=np.array([0.0, 0.0]))
         points = dict(head=(0, 0, -2.3), face=(0, -1.5, 4.2))
-        offset = dict()
+
         for key, pnts in points.items():
             center = cv2.projectPoints(np.float32([pnts]),
                                        self._rotation,

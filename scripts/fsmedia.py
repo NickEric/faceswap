@@ -138,12 +138,12 @@ class Alignments(AlignmentsBase):
             logger.warning("Skip Existing/Skip Faces selected, but no alignments file found!")
             return data
 
-        data = self._serializer.load(self.file)
+        data = super()._load()
 
         if skip_faces:
             # Remove items from alignments that have no faces so they will
             # be re-detected
-            del_keys = [key for key, val in data.items() if not val]
+            del_keys = [key for key, val in data.items() if not val["faces"]]
             logger.debug("Frames with no faces selected for redetection: %s", len(del_keys))
             for key in del_keys:
                 if key in data:
@@ -502,7 +502,7 @@ class DebugLandmarks(PostProcessAction):  # pylint: disable=too-few-public-metho
         for idx, face in enumerate(extract_media.detected_faces):
             logger.trace("Drawing Landmarks. Frame: '%s'. Face: %s", frame, idx)
             # Landmarks
-            for (pos_x, pos_y) in face.aligned.landmarks:
+            for (pos_x, pos_y) in face.aligned.landmarks.astype("int32"):
                 cv2.circle(face.aligned.face, (pos_x, pos_y), 1, (0, 255, 255), -1)
             # Pose
             center = tuple(np.int32((face.aligned.size / 2, face.aligned.size / 2)))
